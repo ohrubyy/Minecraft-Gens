@@ -1,0 +1,288 @@
+#!/bin/bash
+set -euo pipefail
+IFS=$'\n\t'
+
+# shellcheck source=start-utils
+. "${SCRIPTS:-/}start-utils"
+
+: "${EULA:=}"
+: "${PROXY:=}"
+: "${ENABLE_AUTOPAUSE:=false}"
+: "${ENABLE_AUTOSTOP:=false}"
+: "${RCON_CMDS_STARTUP:=}"
+: "${RCON_CMDS_ON_CONNECT:=}"
+: "${RCON_CMDS_ON_DISCONNECT:=}"
+: "${RCON_CMDS_FIRST_CONNECT:=}"
+: "${RCON_CMDS_LAST_DISCONNECT:=}"
+: "${RCON_CMDS_PERIOD:=10}"
+: "${ENABLE_RCON:=true}"
+: "${RCON_PORT:=25575}"
+export ENABLE_RCON RCON_PORT
+
+: "${MEMORY=1G}"
+: "${INIT_MEMORY=${MEMORY}}"
+: "${MAX_MEMORY=${MEMORY}}"
+export MEMORY INIT_MEMORY MAX_MEMORY
+
+shopt -s nullglob
+
+isDebugging && set -x
+
+#umask 002
+export HOME=/data
+
+log "Running as uid=$(id -u) gid=$(id -g) with /data as '$(ls -lnd /data)'"
+
+if [ ! -e /data/eula.txt ]; then
+  if ! isTrue "$EULA"; then
+    log ""
+    logError "Please accept the Minecraft EULA at"
+    logError "  https://account.mojang.com/documents/minecraft_eula"
+    logError "by adding the following immediately after 'docker run':"
+    logError "  -e EULA=TRUE"
+    log ""
+    exit 1
+  fi
+
+  writeEula
+fi
+
+if isTrue "${DEBUG_MEMORY:-false}"; then
+  log "Memory usage and availability (in MB)"
+  uname -a
+  free -m
+fi
+
+##########################################
+# Setup RCON password
+
+if isTrue "${ENABLE_RCON:-true}"; then
+  # turn off debug output
+  set +x
+
+  if [[ -v RCON_PASSWORD_FILE ]]; then
+    if [ ! -e "${RCON_PASSWORD_FILE}" ]; then
+      log ""
+      logError "Initial RCON password file ${RCON_PASSWORD_FILE} does not seems to exist."
+      logError "Please ensure your configuration."
+      logError "If you are using Docker Secrets feature, please check this for further information: "
+      logError " https://docs.docker.com/engine/swarm/secrets"
+      log ""
+      exit 1
+    else
+      RCON_PASSWORD=$(cat "${RCON_PASSWORD_FILE}")
+      export RCON_PASSWORD
+    fi
+  elif ! [[ -v RCON_PASSWORD ]]; then
+    RCON_PASSWORD=$(openssl rand -hex 12)
+    export RCON_PASSWORD
+  fi
+
+  # For rcon-cli access running via exec, which by default is running as root
+  echo "password=${RCON_PASSWORD}" > "$HOME/.rcon-cli.env"
+  echo "password: \"${RCON_PASSWORD}\"" > "$HOME/.rcon-cli.yaml"
+
+  isDebugging && set -x
+else
+  rm -f "$HOME/.rcon-cli.env" "$HOME/.rcon-cli.yaml"
+fi
+
+##########################################
+# Auto-pause/stop
+
+if isTrue "${ENABLE_AUTOPAUSE}" && isTrue "${EXEC_DIRECTLY:-false}"; then
+    logError "EXEC_DIRECTLY=true is incompatible with ENABLE_AUTOPAUSE=true"
+    exit 1
+fi
+
+if isTrue "${ENABLE_AUTOPAUSE}" && isTrue "${ENABLE_AUTOSTOP}"; then
+    logError "ENABLE_AUTOPAUSE=true is incompatible with ENABLE_AUTOSTOP=true"
+    exit 1
+fi
+
+if [[ $PROXY ]]; then
+    export http_proxy="$PROXY"
+    export https_proxy="$PROXY"
+    export JAVA_TOOL_OPTIONS+="-Djava.net.useSystemProxies=true"
+    log "INFO: Giving proxy time to startup..."
+    sleep 5
+fi
+
+function fixJavaPath() {
+  # Some Docker management UIs grab all the image declared variables and present them for configuration.
+  # When upgrading images across Java versions, that creates a mismatch in PATH's expected by base image.
+  if ! which java > /dev/null; then
+    logError "       Your Docker provider has an annoying flaw where it"
+    logError "       tries to set PATH even though the container establishes"
+    logError "       a very specific value."
+    sleep 2
+    # now find where java might be
+    for d in /opt/java/openjdk/bin /usr/bin; do
+      if [ -x "${d}/java" ]; then
+        PATH="${PATH}:${d}"
+        return 0
+      fi
+    done
+    return 1
+  fi
+}
+
+
+if ! fixJavaPath; then
+  logError "could not locate path that contains java"
+  exit 1
+fi
+
+cd /data || exit 1
+
+export DECLARED_TYPE=${TYPE^^}
+export DECLARED_VERSION="$VERSION"
+
+if isTrue "${ENABLE_AUTOPAUSE}"; then
+  "${SCRIPTS:-/}start-autopause"
+fi
+
+if isTrue "${ENABLE_AUTOSTOP}"; then
+  "${SCRIPTS:-/}start-autostop"
+fi
+
+if 
+  [[ "$RCON_CMDS_STARTUP" ]] ||
+  [[ "$RCON_CMDS_ON_CONNECT" ]] ||
+  [[ "$RCON_CMDS_ON_DISCONNECT" ]] || 
+  [[ "$RCON_CMDS_FIRST_CONNECT" ]] || 
+  [[ "$RCON_CMDS_LAST_DISCONNECT" ]]
+then
+  log "Starting RCON commands"
+  # shellcheck source=start-rconcmds
+  "${SCRIPTS:-/}start-rconcmds"
+fi
+
+: "${MODPACK_PLATFORM:=${MOD_PLATFORM:-}}"
+
+if [[ $MODPACK_PLATFORM && $TYPE && $TYPE != VANILLA ]]; then
+  logWarning "Avoid setting TYPE and MODPACK_PLATFORM"
+fi
+
+case "${TYPE^^}" in
+  AUTO_CURSEFORGE|MODRINTH|CURSEFORGE|FTB|FTBA)
+    MODPACK_PLATFORM="$TYPE"
+  ;;
+esac
+
+if [[ $MODPACK_PLATFORM ]]; then
+  case "${MODPACK_PLATFORM^^}" in
+    FTB|CURSEFORGE)
+      exec "${SCRIPTS:-/}start-deployCF" "$@"
+    ;;
+
+    FTBA)
+      exec "${SCRIPTS:-/}start-deployFTBA" "$@"
+    ;;
+
+    AUTO_CURSEFORGE)
+      exec "${SCRIPTS:-/}start-deployAutoCF" "$@"
+      ;;
+
+    MODRINTH)
+      exec "${SCRIPTS:-/}start-deployModrinth" "$@"
+      ;;
+
+    *)
+      logError "Invalid MODPACK_PLATFORM: '$MODPACK_PLATFORM'"
+      exit 1
+      ;;
+  esac
+fi
+
+log "Resolving type given ${TYPE}"
+case "${TYPE^^}" in
+  *BUKKIT|SPIGOT)
+    exec "${SCRIPTS:-/}start-deployBukkitSpigot" "$@"
+  ;;
+
+  PAPER)
+    exec "${SCRIPTS:-/}start-deployPaper" "$@"
+  ;;
+
+  FOLIA)
+    exec "${SCRIPTS:-/}start-deployFolia" "$@"
+  ;;
+
+  FORGE)
+    exec "${SCRIPTS:-/}start-deployForge" "$@"
+  ;;
+
+  NEOFORGE|NEOFORGED)
+    exec "${SCRIPTS:-/}start-deployNeoForge" "$@"
+  ;;
+
+  FABRIC)
+    exec "${SCRIPTS:-/}start-deployFabric" "$@"
+  ;;
+
+  QUILT)
+    exec "${SCRIPTS:-/}start-deployQuilt" "$@"
+  ;;
+
+  VANILLA)
+    exec "${SCRIPTS:-/}start-deployVanilla" "$@"
+  ;;
+
+  SPONGEVANILLA)
+    exec "${SCRIPTS:-/}start-deploySpongeVanilla" "$@"
+  ;;
+
+  CUSTOM)
+    exec "${SCRIPTS:-/}start-deployCustom" "$@"
+  ;;
+
+  MAGMA)
+    exec "${SCRIPTS:-/}start-deployMagma" "$@"
+  ;;
+
+  MAGMA_MAINTAINED)
+    exec "${SCRIPTS:-/}start-deployMagmaMaintained" "$@"
+  ;;
+
+  KETTING)
+    exec "${SCRIPTS:-/}start-deployKetting" "$@"
+  ;;
+
+  MOHIST)
+    exec "${SCRIPTS:-/}start-deployMohist" "$@"
+  ;;
+
+  CATSERVER)
+    exec "${SCRIPTS:-/}start-deployCatserver" "$@"
+  ;;
+
+  PURPUR)
+    exec "${SCRIPTS:-/}start-deployPurpur" "$@"
+  ;;
+
+  PUFFERFISH)
+    exec "${SCRIPTS:-/}start-deployPufferfish" "$@"
+  ;;
+
+  CANYON)
+    exec "${SCRIPTS:-/}start-deployCanyon" "$@"
+  ;;
+
+  LIMBO)
+    exec "${SCRIPTS:-/}start-deployLimbo" "$@"
+  ;;
+
+  CRUCIBLE)
+    exec "${SCRIPTS:-/}start-deployCrucible" "$@"
+  ;;
+
+  *)
+      logError "Invalid TYPE: '$TYPE'"
+      logError "Must be: VANILLA, FORGE, BUKKIT, SPIGOT, PAPER, FOLIA, PURPUR, FABRIC, QUILT,"
+      logError "         SPONGEVANILLA, CUSTOM, MAGMA, MOHIST, CATSERVER, AIRPLANE, PUFFERFISH,"
+      logError "         CANYON, LIMBO, CRUCIBLE"
+      exit 1
+  ;;
+
+esac

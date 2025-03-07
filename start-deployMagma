@@ -1,0 +1,29 @@
+#!/bin/bash
+
+# shellcheck source=start-utils
+. "${SCRIPTS:-/}start-utils"
+isDebugging && set -x
+
+: "${MAGMA_VERSION:=}"
+
+resolveVersion
+
+if ! downloadUrl=$(get --json-path '$.link' "https://api.magmafoundation.org/api/v2/${VERSION}/latest/${MAGMA_VERSION}"); then
+  logError "Failed to locate latest Magma download for ${VERSION}. Is that version supported?"
+  exit 1
+fi
+
+if [[ $downloadUrl == null ]]; then
+  logError "Magma does not seem to be available for $VERSION"
+  exit 1
+fi
+
+if ! SERVER=$(get --output-filename --skip-up-to-date --output /data "$downloadUrl"); then
+  logError "Failed to download Magma server jar from $downloadUrl"
+  exit 1
+fi
+
+export SERVER
+export FAMILY=HYBRID
+
+exec "${SCRIPTS:-/}start-spiget" "$@"

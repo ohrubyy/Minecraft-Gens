@@ -1,0 +1,42 @@
+#!/bin/bash
+set -euo pipefail
+IFS=$'\n\t'
+
+: "${PURPUR_BUILD:=LATEST}"
+: "${PURPUR_DOWNLOAD_URL:=}"
+
+# shellcheck source=start-utils
+. "${SCRIPTS:-/}start-utils"
+isDebugging && set -x
+
+resultsFile=/data/.purpur.env
+
+if [[ $PURPUR_DOWNLOAD_URL ]]; then
+  if ! mc-image-helper install-purpur \
+    --output-directory=/data \
+    --results-file="$resultsFile" \
+    --url="${PURPUR_DOWNLOAD_URL}"; then
+      logError "Failed to download from custom Purpur URL"
+      exit 1
+  fi
+else
+  args=(
+    --output-directory=/data
+    --results-file="$resultsFile"
+    --version="$VERSION"
+  )
+  if [[ $PURPUR_BUILD ]]; then
+    args+=(--build="$PURPUR_BUILD")
+  fi
+  if ! mc-image-helper install-purpur "${args[@]}"; then
+      logError "Failed to download Purpur"
+      exit 1
+  fi
+fi
+
+applyResultsFile ${resultsFile}
+
+# Normalize on Spigot for later operations
+export FAMILY=SPIGOT
+
+exec "${SCRIPTS:-/}start-spiget" "$@"

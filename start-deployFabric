@@ -1,0 +1,50 @@
+#!/bin/bash
+set -eu
+
+# shellcheck source=start-utils
+. "${SCRIPTS:-/}start-utils"
+
+export TYPE=FABRIC
+: "${FABRIC_LAUNCHER_VERSION:=${FABRIC_INSTALLER_VERSION:-LATEST}}"
+: "${FABRIC_LAUNCHER:=}"
+: "${FABRIC_LAUNCHER_URL:=}"
+: "${FABRIC_LOADER_VERSION:=LATEST}"
+
+resultsFile=/data/.install-fabric.env
+
+isDebugging && set -x
+
+# Custom fabric jar
+if [[ $FABRIC_LAUNCHER ]]; then
+  if !   mc-image-helper install-fabric-loader \
+    --results-file=${resultsFile} \
+    --from-local-file="$FABRIC_LAUNCHER"; then
+    logError "Failed to use provided Fabric launcher"
+    exit 1
+  fi
+
+# Custom fabric jar url
+elif [[ $FABRIC_LAUNCHER_URL ]]; then
+  if !   mc-image-helper install-fabric-loader \
+    --results-file=${resultsFile} \
+    --from-url="$FABRIC_LAUNCHER_URL"; then
+    logError "Failed to installFabric launcher from $FABRIC_LAUNCHER_URL"
+    exit 1
+  fi
+
+# Official fabric launcher
+else
+  if !   mc-image-helper install-fabric-loader \
+    --results-file=${resultsFile} \
+    --minecraft-version="${VERSION}" \
+    --installer-version="${FABRIC_LAUNCHER_VERSION}" \
+    --loader-version="${FABRIC_LOADER_VERSION}"; then
+    logError "Failed to installFabric launcher given $VERSION, $FABRIC_LAUNCHER_VERSION, $FABRIC_LOADER_VERSION"
+    exit 1
+  fi
+fi
+
+applyResultsFile ${resultsFile}
+
+export FAMILY=FABRIC
+exec "${SCRIPTS:-/}start-setupWorld" "$@"

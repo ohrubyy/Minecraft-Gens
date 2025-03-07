@@ -1,0 +1,349 @@
+#!/bin/bash
+
+set -e -o pipefail
+
+: "${REMOVE_OLD_MODS:=false}"
+: "${MODS:=}"
+: "${MODS_OUT_DIR:=/data/mods}"
+: "${MODS_FILE:=}"
+: "${PLUGINS:=}"
+: "${PLUGINS_OUT_DIR:=/data/plugins}"
+: "${PLUGINS_FILE:=}"
+: "${REMOVE_OLD_MODS_DEPTH:=1} "
+: "${REMOVE_OLD_MODS_INCLUDE:=*.jar,*-version.json}"
+sum_file=/data/.generic_pack.sum
+
+# shellcheck source=start-utils
+. "${SCRIPTS:-/}start-utils"
+isDebugging && set -x
+
+#  CURSE_URL_BASE used in manifest downloads below
+CURSE_URL_BASE=${CURSE_URL_BASE:-https://minecraft.curseforge.com/projects}
+
+# Remove old mods/plugins
+if isTrue "${REMOVE_OLD_MODS}" && [ -z "${MODS_FILE}" ]; then
+  removeOldMods "$MODS_OUT_DIR"
+  removeOldMods "$PLUGINS_OUT_DIR"
+  rm -f "$sum_file"
+fi
+
+function handlePackwiz() {
+  # If packwiz url passed, bootstrap packwiz and update mods before other modpack processing
+  if [[ "${PACKWIZ_URL:-}" ]]; then
+    if ! packwizInstaller=$(mc-image-helper maven-download \
+                           --maven-repo=https://maven.packwiz.infra.link/repository/release/ \
+                           --group=link.infra.packwiz --artifact=packwiz-installer --classifier=dist \
+                           --skip-existing); then
+      logError "Failed to get packwiz installer"
+      exit 1
+    fi
+
+    log "Running packwiz installer against URL: ${PACKWIZ_URL}"
+    if ! java -cp "${packwizInstaller}" link.infra.packwiz.installer.Main -s server "${PACKWIZ_URL}"; then
+      logError "Failed to run packwiz installer"
+      exit 1
+    fi
+  fi
+}
+
+function handleModpackZip() {
+# If supplied with a URL for a modpack (simple zip of jars), download it and unpack
+if [[ "$MODPACK" ]]; then
+  if isURL "${MODPACK}"; then
+    log "Downloading mod/plugin pack"
+    if ! get -o /tmp/modpack.zip "${MODPACK}"; then
+      logError "Failed to download from ${MODPACK}"
+      exit 2
+    fi
+  elif [[ "$MODPACK" =~ .*\.zip ]]; then
+    if ! cp "$MODPACK" /tmp/modpack.zip; then
+      logError "Failed to copy from $MODPACK"
+      exit 2
+    fi
+  else
+    logError "Invalid URL or Path given for MODPACK: $MODPACK"
+    exit 1
+  fi
+
+  if [ "$FAMILY" = "SPIGOT" ]; then
+    mkdir -p "$PLUGINS_OUT_DIR"
+    if ! unzip -o -d "$PLUGINS_OUT_DIR" /tmp/modpack.zip; then
+      logError "Failed to unzip the modpack from ${MODPACK}"
+    fi
+  else
+    mkdir -p "$MODS_OUT_DIR"
+    if ! unzip -o -d "$MODS_OUT_DIR" /tmp/modpack.zip; then
+      logError "Failed to unzip the modpack from ${MODPACK}"
+    fi
+  fi
+  rm -f /tmp/modpack.zip
+fi
+}
+
+function handleListings() {
+  if usesMods && usesPlugins; then
+      if [[ "$MODS" ]]; then
+
+        ensureRemoveAllModsOff "MODS is set"
+
+        mkdir -p "$MODS_OUT_DIR"
+        mc-image-helper mcopy \
+          --glob=*.jar \
+          --scope=var-list \
+          --to="$MODS_OUT_DIR" \
+          "$MODS"
+      fi
+      if [[ "$PLUGINS" ]]; then
+        ensureRemoveAllModsOff "PLUGINS is set"
+        mkdir -p "$PLUGINS_OUT_DIR"
+        mc-image-helper mcopy \
+          --glob=*.jar \
+          --scope=var-list \
+          --to="$PLUGINS_OUT_DIR" \
+          "$PLUGINS"
+      fi
+
+      if [[ "$MODS_FILE" ]]; then
+        ensureRemoveAllModsOff "MODS_FILE is set"
+        mkdir -p "$MODS_OUT_DIR"
+        mc-image-helper mcopy \
+          --file-is-listing \
+          --scope=file-list \
+          --to="$MODS_OUT_DIR" \
+          "$MODS_FILE"
+      fi
+      if [[ "$PLUGINS_FILE" ]]; then
+        ensureRemoveAllModsOff "PLUGINS_FILE is set"
+        mkdir -p "$PLUGINS_OUT_DIR"
+        mc-image-helper mcopy \
+          --file-is-listing \
+          --scope=file-list \
+          --to="$PLUGINS_OUT_DIR" \
+          "$PLUGINS_FILE"
+      fi
+
+  elif usesPlugins || usesMods; then
+    outDir="$MODS_OUT_DIR"
+    if usesPlugins; then
+      outDir="$PLUGINS_OUT_DIR"
+    fi
+
+    if [[ "$MODS" || "$PLUGINS" ]]; then
+      ensureRemoveAllModsOff "MODS or PLUGINS is set"
+      mkdir -p "$outDir"
+      mc-image-helper mcopy \
+        --glob=*.jar \
+        --scope=var-list \
+        --to="$outDir" \
+        "$MODS" "$PLUGINS"
+    fi
+
+    if [[ "$MODS_FILE" || "$PLUGINS_FILE" ]]; then
+      ensureRemoveAllModsOff "MODS_FILE or PLUGINS_FILE is set"
+      mkdir -p "$outDir"
+      mc-image-helper mcopy \
+        --file-is-listing \
+        --scope=file-list \
+        --to="$outDir" \
+        "$MODS_FILE" "$PLUGINS_FILE"
+    fi
+
+  fi
+}
+
+function handleGenericPacks() {
+  : "${GENERIC_PACKS:=${GENERIC_PACK}}"
+  : "${GENERIC_PACKS_PREFIX:=}"
+  : "${GENERIC_PACKS_SUFFIX:=}"
+  : "${GENERIC_PACKS_DISABLE_MODS:=}"
+
+  if [[ "${GENERIC_PACKS}" ]]; then
+    IFS=',' read -ra packs <<< "${GENERIC_PACKS}"
+
+    packFiles=()
+    for packEntry in "${packs[@]}"; do
+      pack="${GENERIC_PACKS_PREFIX}${packEntry}${GENERIC_PACKS_SUFFIX}"
+      if isURL "${pack}"; then
+        mkdir -p /data/packs
+        log "Downloading generic pack from $pack"
+        if ! outfile=$(get -o /data/packs --output-filename --skip-up-to-date "$pack"); then
+          logError "Failed to download $pack"
+          exit 2
+        fi
+        packFiles+=("$outfile")
+      else
+        packFiles+=("$pack")
+      fi
+    done
+
+    isDebugging && [ -f "$sum_file}" ] && cat "$sum_file"
+
+    log "Checking if generic packs are up to date"
+    if isTrue "${SKIP_GENERIC_PACK_UPDATE_CHECK:-false}" && [ -f "$sum_file" ]; then
+      log "Skipping generic pack update check"
+    elif isTrue "${FORCE_GENERIC_PACK_UPDATE}" || ! checkSum "${sum_file}"; then
+      log "Generic pack(s) are out of date. Re-applying..."
+
+      original_base_dir=/data/.tmp/generic_pack_base
+      base_dir=$original_base_dir
+      rm -rf "${base_dir}"
+      mkdir -p "${base_dir}"
+      for pack in "${packFiles[@]}"; do
+        isDebugging && ls -l "${pack}"
+        extract "${pack}" "${base_dir}"
+      done
+
+      # Disable mods
+      for mod in ${GENERIC_PACKS_DISABLE_MODS}; do
+        log Disabling $mod
+        find "${base_dir}" -name "$mod" -exec mv {} {}.disabled -v \;
+      done
+
+      # Remove any eula file since container manages it
+      rm -f "${base_dir}/eula.txt"
+
+      # recalculate the actual base directory of content
+      if ! base_dir=$(mc-image-helper find \
+          --max-depth=3 --type=directory --name=mods,plugins,config \
+          --only-shallowest --fail-no-matches --format '%h' \
+          "$base_dir"); then
+        logError "Unable to find content base of generic packs ${GENERIC_PACKS}. Directories:"
+        mc-image-helper find --name=* --max-depth=3 --type=directory --format '- %P' "$original_base_dir"
+        exit 1
+      fi
+
+      if [ -f /data/manifest.txt ]; then
+        log "Manifest exists from older generic pack, cleaning up ..."
+        while read -r f; do
+          rm -rf "/data/${f}"
+        done < /data/manifest.txt
+        # prune empty dirs
+        find /data -mindepth 1 -depth -type d -empty -delete
+        rm -f /data/manifest.txt
+      fi
+
+      log "Writing generic pack manifest ... "
+      find "${base_dir}" -type f -printf "%P\n" > /data/manifest.txt
+
+      log "Applying generic pack ..."
+      cp -R -f "${base_dir}"/* /data
+      rm -rf $original_base_dir
+
+      if isTrue "${SKIP_GENERIC_PACK_CHECKSUM:-false}"; then
+        log "Skipping generic pack(s) checksum"
+      else
+        log "Saving generic pack(s) checksum"
+        sha1sum "${packFiles[@]}" > "${sum_file}"
+        if isDebugging; then
+          cat "$sum_file"
+        fi
+      fi
+    fi
+  fi
+}
+
+function handleModrinthProjects() {
+  : "${MODRINTH_PROJECTS:=}"
+  : "${MODRINTH_ALLOWED_VERSION_TYPE:=release}"
+  : "${MODRINTH_DOWNLOAD_DEPENDENCIES:=none}"
+  if [[ -v MODRINTH_DOWNLOAD_OPTIONAL_DEPENDENCIES ]]; then
+    logWarning "The variable MODRINTH_DOWNLOAD_OPTIONAL_DEPENDENCIES is removed."
+    logWarning "        Use MODRINTH_DOWNLOAD_DEPENDENCIES=optional instead"
+  fi
+
+  if [[ $MODRINTH_PROJECTS ]]; then
+    if isFamily HYBRID; then
+      loader=forge
+    elif isFamily VANILLA; then
+      loader=datapack
+    else
+      loader="${TYPE,,}"
+    fi
+    mc-image-helper modrinth \
+      --output-directory=/data \
+      --world-directory="${LEVEL:-world}" \
+      --projects="${MODRINTH_PROJECTS}" \
+      --game-version="${VERSION}" \
+      --loader="$loader" \
+      --download-dependencies="$MODRINTH_DOWNLOAD_DEPENDENCIES" \
+      --allowed-version-type="$MODRINTH_ALLOWED_VERSION_TYPE"
+  fi
+}
+
+function handleCurseForgeFiles() {
+  args=()
+  if usesMods && ! usesPlugins; then
+    args+=(--default-category mc-mods)
+  elif usesPlugins && ! usesMods; then
+    args+=(--default-category bukkit-plugins)
+  fi
+
+  case "${TYPE,,}" in
+    forge|neoforge|fabric|quilt)
+      args+=(--mod-loader "$TYPE")
+      ;;
+    *)
+      if isFamily HYBRID; then
+        # To disambiguate mc-mods we'll assume that hybrid servers
+        # are blending Forge (rather than Fabric or NeoForge)
+        args+=(--mod-loader "forge")
+      fi
+      ;;
+  esac
+
+  # shellcheck disable=SC2086
+  # since we want CURSEFORGE_FILES to expand
+  mc-image-helper curseforge-files \
+    "${args[@]}" \
+    ${CURSEFORGE_FILES}
+}
+
+handlePackwiz
+
+handleModpackZip
+
+handleListings
+
+if [[ $MANIFEST ]]; then
+  logError "MANIFEST is no longer supported."
+  logError "       Use MODPACK_PLATFORM=AUTO_CURSEFORGE and CF_MODPACK_MANIFEST instead"
+  exit 1
+fi
+
+if [[ $MODS_FORGEAPI_KEY || $MODS_FORGEAPI_FILE || $MODS_FORGEAPI_PROJECTIDS ]]; then
+  logError "The MODS_FORGEAPI_FILE / MODS_FORGEAPI_PROJECTIDS feature is no longer supported"
+  logError "      Use CURSEFORGE_FILES instead."
+  exit 1
+fi
+
+handleGenericPacks
+
+handleModrinthProjects
+
+if usesMods || usesPlugins; then
+  handleCurseForgeFiles
+fi
+
+# If supplied with a URL for a config (simple zip of configurations), download it and unpack
+if [[ "$MODCONFIG" ]]; then
+case "X$MODCONFIG" in
+  X[Hh][Tt][Tt][Pp]*[Zz][iI][pP])
+    log "Downloading mod/plugin configs via HTTP"
+    log "  from $MODCONFIG ..."
+    curl -sSL -o /tmp/modconfig.zip "$MODCONFIG"
+    if [ "$FAMILY" = "SPIGOT" ]; then
+      mkdir -p /data/plugins
+      unzip -o -d /data/plugins /tmp/modconfig.zip
+    else
+      mkdir -p /data/config
+      unzip -o -d /data/config /tmp/modconfig.zip
+    fi
+    rm -f /tmp/modconfig.zip
+    ;;
+  *)
+    log "Invalid URL given for modconfig: Must be HTTP or HTTPS and a ZIP file"
+    ;;
+esac
+fi
+
+exec "${SCRIPTS:-/}start-setupMounts" "$@"

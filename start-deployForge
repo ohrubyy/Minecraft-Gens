@@ -1,0 +1,49 @@
+#!/bin/bash
+
+: "${FORGE_VERSION:=${FORGEVERSION:-RECOMMENDED}}"
+: "${FORGE_FORCE_REINSTALL:=false}}"
+
+# shellcheck source=start-utils
+. "${SCRIPTS:-$(dirname "$0")}/start-utils"
+isDebugging && set -x
+resultsFile=/data/.run-forge.env
+
+function mc-image-helper-forge() {
+  mc-image-helper install-forge \
+    --output-directory=/data \
+    --results-file="${resultsFile}" \
+    --minecraft-version="${VERSION}" \
+    --force-reinstall="${FORGE_FORCE_REINSTALL}" "$@"
+}
+
+if [[ ${FORGE_INSTALLER} ]]; then
+  if ! mc-image-helper-forge --forge-installer="${FORGE_INSTALLER}" ; then
+      logError "Failed to installForge given installer ${FORGE_INSTALLER}"
+      exit 1
+  fi
+elif [[ ${FORGE_INSTALLER_URL:-} ]]; then
+  mkdir -p tmp
+  if ! installer=$(get -o tmp --output-filename "${FORGE_INSTALLER_URL}"); then
+    logError "Failed to download installer from $FORGE_INSTALLER_URL"
+    exit 1
+  fi
+
+  # shellcheck disable=SC2064
+  trap "rm $installer" EXIT
+
+  if ! mc-image-helper-forge --forge-installer="${installer}" ; then
+      logError "Failed to install forge from ${FORGE_INSTALLER_URL}"
+      exit 1
+  fi
+else
+  if ! mc-image-helper-forge --forge-version="${FORGE_VERSION}"; then
+      logError "Failed to install Forge"
+      exit 1
+  fi
+fi
+
+applyResultsFile ${resultsFile}
+
+export FAMILY=FORGE
+
+exec "${SCRIPTS:-/}start-setupWorld" "$@"

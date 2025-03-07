@@ -1,0 +1,54 @@
+#!/bin/bash
+
+# shellcheck source=start-utils
+. "${SCRIPTS:-$(dirname "$0")}/start-utils"
+set -o pipefail
+set -e
+isDebugging && set -x
+
+resolveVersion
+: "${MOHIST_BUILD:=lastSuccessfulBuild}"
+
+mohistBaseUrl="https://mohistmc.com/api/v2/projects/mohist/"
+mohistApiUrl="${mohistBaseUrl}${VERSION}/builds/"
+
+function logMohistAvailableVerisons(){
+  logError "       check ${mohistBaseUrl} for available versions"
+  logError "       and set VERSION accordingly"
+}
+
+if ! get --exists "${mohistApiUrl}"; then
+  logError "Mohist builds do not exist for ${VERSION}"
+  logMohistAvailableVerisons
+  exit 1
+fi
+
+if [[ "${MOHIST_BUILD}" == "lastSuccessfulBuild" ]]; then
+  # Get the latest build number from the API
+  buildNumber=$(
+    get --json-path '$.builds[-1].number' "${mohistApiUrl}"
+  )
+  MOHIST_BUILD="${buildNumber}"
+fi
+
+downloadUrl=$(
+  get --json-path "$.builds[?(@.number==${MOHIST_BUILD})].url" "${mohistApiUrl}"
+)
+
+if [[ -z "${downloadUrl}" ]]; then
+  logError "Could not find build ${MOHIST_BUILD} for version ${VERSION}"
+  logMohistAvailableVerisons
+  exit 1
+fi
+
+SERVER="/data/mohist-${VERSION}-${MOHIST_BUILD}-server.jar"
+
+if [ ! -f "${SERVER}" ]; then
+  log "Downloading Mohist build ${MOHIST_BUILD} for ${VERSION}"
+  get -o "${SERVER}" "${downloadUrl}"
+fi
+
+export FAMILY=HYBRID
+export SERVER
+
+exec "${SCRIPTS:-/}start-spiget" "$@"

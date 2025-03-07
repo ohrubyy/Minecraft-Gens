@@ -1,0 +1,100 @@
+#!/bin/bash
+set -euo pipefail
+IFS=$'\n\t'
+
+: "${EXISTING_OPS_FILE:=SYNC_FILE_MERGE_LIST}"
+: "${EXISTING_WHITELIST_FILE:=SYNC_FILE_MERGE_LIST}"
+
+# shellcheck source=start-utils
+. "${SCRIPTS:-/}start-utils"
+isDebugging && set -x
+
+if [[ -v APPEND_OPS ]] && isTrue "${APPEND_OPS}"; then
+  EXISTING_OPS_FILE=MERGE
+elif [[ -v OVERRIDE_OPS ]] && isTrue "${OVERRIDE_OPS}"; then
+  EXISTING_OPS_FILE=SYNCHRONIZE
+fi
+
+if [[ -v APPEND_WHITELIST ]] && isTrue "${APPEND_WHITELIST}"; then
+  EXISTING_WHITELIST_FILE=MERGE
+elif [[ -v OVERRIDE_WHITELIST ]] && isTrue "${OVERRIDE_WHITELIST}"; then
+  EXISTING_WHITELIST_FILE=SYNCHRONIZE
+fi
+
+sharedArgs=(--version="$VERSION")
+if [[ ${FTB_DIR:-} ]]; then
+  sharedArgs+=(--output-directory="$FTB_DIR")
+else
+  sharedArgs+=(--output-directory=/data)
+fi
+
+if [[ -v OPS_FILE ]]; then
+  existing="$EXISTING_OPS_FILE"
+  if [[ "$EXISTING_OPS_FILE" = SYNC_FILE_MERGE_LIST ]]; then
+    existing=SYNCHRONIZE
+  fi
+  mc-image-helper manage-users \
+    "${sharedArgs[@]}" \
+    --type=JAVA_OPS \
+    --input-is-file \
+    --existing="${existing}" \
+    "$OPS_FILE"
+fi
+if [[ -v OPS ]]; then
+  args=()
+  existing="$EXISTING_OPS_FILE"
+  # Working with an OPS list, so normalize the value to a "non-file" mode
+  if [[ "$EXISTING_OPS_FILE" = SYNC_FILE_MERGE_LIST ]]; then
+    existing=MERGE
+  fi
+  # legacy option
+  if [[ -v APPEND_OPS ]] && isTrue "${APPEND_OPS}"; then
+    existing=MERGE
+  fi
+  # legacy option
+  if [[ -v OVERRIDE_OPS ]] && isFalse "${OVERRIDE_OPS}"; then
+    existing=SKIP
+  fi
+  # shellcheck disable=SC2086
+  mc-image-helper manage-users \
+    "${sharedArgs[@]}" "${args[@]}" \
+    --type=JAVA_OPS \
+    --existing="${existing}" \
+    $OPS
+fi
+
+if [[ -v WHITELIST_FILE ]]; then
+  existing="$EXISTING_WHITELIST_FILE"
+  if [[ "$EXISTING_WHITELIST_FILE" = SYNC_FILE_MERGE_LIST ]]; then
+    existing=SYNCHRONIZE
+  fi
+  mc-image-helper manage-users \
+    "${sharedArgs[@]}" \
+    --type=JAVA_WHITELIST \
+    --input-is-file \
+    --existing="${existing}" \
+   "$WHITELIST_FILE"
+fi
+if [[ -v WHITELIST ]]; then
+  args=()
+  existing="$EXISTING_WHITELIST_FILE"
+  if [[ "$EXISTING_WHITELIST_FILE" = SYNC_FILE_MERGE_LIST ]]; then
+    existing=MERGE
+  fi
+  # legacy option
+  if [[ -v APPEND_WHITELIST ]] && isTrue "${APPEND_WHITELIST}"; then
+    existing=MERGE
+  fi
+  # legacy option
+  if [[ -v OVERRIDE_WHITELIST ]] && isFalse "${OVERRIDE_WHITELIST}"; then
+    existing=SKIP
+  fi
+  # shellcheck disable=SC2086
+  mc-image-helper manage-users \
+    "${sharedArgs[@]}" "${args[@]}" \
+    --type=JAVA_WHITELIST \
+    --existing="${existing}" \
+    $WHITELIST
+fi
+
+exec "${SCRIPTS:-/}start-finalExec" "$@"
